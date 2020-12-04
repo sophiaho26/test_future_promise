@@ -117,21 +117,6 @@ public:
 		return;
 	}
 private:
-	void APIThreadStart() {
-		do {
-
-		} while (inited_);
-	}
-	void RunCreateChannel(std::promise<int> p) {
-		std::cout << name_ << ":CreateChannel Thread Start" << std::endl;
-		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-		// 	p1.set_value_at_thread_exit(1);
-		p.set_value(2);
-
-		ramdon = 2;
-		std::cout << name_ << ":CreateChannel Thread End" << std::endl;
-	}
-
 	void RunCreateChannelCanTerminate(std::future<void> future_obj, std::promise<common> p) {
 		std::cout << name_ << ":RunCreateChannelCanTerminate Thread Start" << std::endl;
 		int i = 0;
