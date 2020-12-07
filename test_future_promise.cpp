@@ -49,16 +49,22 @@ struct ExitAndExecuteSignals {
 	std::future<common> execute_future = execute_signal.get_future();
 };
 
+enum class StartState {
+	kDefault = 0, kChannelCreated,
+	kSignalingConnected, kTrackUpdated
+};
+
+enum class SIGNALING_CONNECTION_STATE { kClosed = 0, kOpened, kFailed };
 
 template <typename Func, typename Obj>
 common WailUntil(Func func, Obj obj,std::string name,
-	std::chrono::system_clock::time_point& time_out_seconds) {
+	std::chrono::system_clock::time_point& timeout_time) {
 	auto rc = common::kAudienceOk;
 	ExitAndExecuteSignals signals;
 
-	std::unique_ptr<std::thread>th1_ = std::make_unique<std::thread>(func, obj, std::move(signals.exit_future), std::move(signals.execute_signal));
+	std::unique_ptr<std::thread>th = std::make_unique<std::thread>(func, obj, std::move(signals.exit_future), std::move(signals.execute_signal), timeout_time);
 
-	if (std::future_status::ready == signals.execute_future.wait_until(time_out_seconds))
+	if (std::future_status::ready == signals.execute_future.wait_until(timeout_time))
 	{
 		std::cout << name << ":Run Func Finished. \n";
 	}
@@ -67,13 +73,13 @@ common WailUntil(Func func, Obj obj,std::string name,
 		std::cout << name << ":Run Func did not complete!\n";
 		rc = common::kTimeout;
 		signals.exit_signal.set_value();
-		if (th1_->joinable()) {
-			th1_->join();
+		if (th->joinable()) {
+			th->join();
 		}
 		return rc;
 	}
-	if (th1_->joinable()) {
-		th1_->join();
+	if (th->joinable()) {
+		th->join();
 	}
 
 	rc = signals.execute_future.get();
@@ -103,20 +109,113 @@ public:
 			api_thread_.join();
 		}
 	}
-	void StartCanTerminate(BaseStreamSession* session, int timeout, SATRT_COMPLETE_FUNC funt_ptr) {
+	void Start(BaseStreamSession* session, int timeout, SATRT_COMPLETE_FUNC funt_ptr) {
 		if (state_ != kInited) return;
 		state_ = kStarting;
-		std::thread t = std::thread(&BaseStreamSession::StartTaskCanTerminate, this, funt_ptr, timeout);
+		std::thread t = std::thread(&BaseStreamSession::StartTask, this, funt_ptr, timeout);
 		t.join();
 		return;
 	}
 
 	void UpdateTrackInfo(BaseStreamSession* session, int timeout, SATRT_COMPLETE_FUNC funt_ptr) {
 		if (state_ != kUpdateNeeded && state_ != kUnstable) return;
-		api_thread_ = std::thread(&BaseStreamSession::StartTaskCanTerminate, this, funt_ptr, timeout);
+		api_thread_ = std::thread(&BaseStreamSession::StartTask, this, funt_ptr, timeout);
 		return;
 	}
 private:
+
+	common CreateChannel() {
+		std::cout << "CreateChannelID entered" << std::endl;
+		std::this_thread::sleep_for(std::chrono::milliseconds(600));
+		std::cout << "CreateChannelID left" << std::endl;
+		return common::kAudienceOk;
+	}
+
+	common ConnectSignalingServer(std::chrono::system_clock::time_point& timeout_time) {
+		std::cout << "ConnectSignalingServer entered" << std::endl;
+		std::thread([&]() {  
+			std::this_thread::sleep_for(std::chrono::milliseconds(600));
+			std::lock_guard<std::mutex> lk(signaling_mutex_);
+			signaling_state_ = SIGNALING_CONNECTION_STATE::kOpened;
+			signaling_cv.notify_all();
+			}).detach();
+
+		std::unique_lock<std::mutex> lk(signaling_mutex_);
+		signaling_cv.wait_until(lk, timeout_time, [this] {
+			return (signaling_state_ == SIGNALING_CONNECTION_STATE::kOpened);
+			});
+		lk.unlock();
+		if (signaling_state_ != SIGNALING_CONNECTION_STATE::kOpened) {
+			std::cout << "ConnectSignalingServer timeout" << std::endl;
+			std::cout.flush();
+			return common::kTimeout;
+		}
+
+		std::cout << "ConnectSignalingServer left" << std::endl;
+		return common::kAudienceOk;
+	}
+	
+	common UpdateChannelID(std::chrono::system_clock::time_point& timeout_time) {
+		std::cout << "UpdateChannelID entered" << std::endl;
+		std::thread([&]() {
+			std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+			std::lock_guard<std::mutex> lk(update_id_mutex_);
+			update_id = true;
+			update_id_cv.notify_all();
+			}).detach();
+
+			std::unique_lock<std::mutex> lk(update_id_mutex_);
+			update_id_cv.wait_until(lk, timeout_time, [this] {
+				return update_id;
+				});
+			lk.unlock();
+			if (!update_id) {
+				std::cout << "UpdateChannelID timeout" << std::endl;
+				return common::kTimeout;
+			}
+
+
+		std::cout << "UpdateChannelID left" << std::endl;
+		return common::kAudienceOk;
+	}
+
+	void RunStart(std::future<void> future_obj, std::promise<common> p, std::chrono::system_clock::time_point timeout_time) {
+		auto rc = common::kTimeout;
+		while (future_obj.wait_for(std::chrono::milliseconds(1)) == std::future_status::timeout) {
+			if (start_state_ == StartState::kDefault) {
+				rc = CreateChannel();
+				if (rc != common::kAudienceOk)
+				{
+					std::cout << "CreateChannelID rc ({})" << rc;
+					break;
+				}
+				start_state_ = StartState::kChannelCreated;
+				continue;
+			}
+			else if (start_state_ == StartState::kChannelCreated) {
+				rc = ConnectSignalingServer(timeout_time);
+				if (rc != common::kAudienceOk) {
+					std::cout << "ConnectSignalingServer rc ({})" << rc;
+					break;
+				}
+				start_state_ = StartState::kSignalingConnected;
+				continue;
+			}
+			else if (start_state_ == StartState::kSignalingConnected) {
+				rc = UpdateChannelID(timeout_time);
+				if (rc != common::kAudienceOk) {
+					std::cout << "UpdateChannelID rc ({})" << rc;
+					break;
+				}
+				start_state_ = StartState::kTrackUpdated;
+				state_ = KReady;
+				break;
+			}
+		}
+		p.set_value(rc);
+	}
+
+
 	void RunCreateChannelCanTerminate(std::future<void> future_obj, std::promise<common> p) {
 		std::cout << name_ << ":RunCreateChannelCanTerminate Thread Start" << std::endl;
 		int i = 0;
@@ -152,105 +251,30 @@ private:
 		else
 			p.set_value(common::kTimeout);
 	}
-	void RunSingalingConnect(std::promise<int> p) {
-		std::cout << name_ << ":RunSingalingConnect Thread Start" << std::endl;
-		std::this_thread::sleep_for(std::chrono::milliseconds(3000));
-		// 	p1.set_value_at_thread_exit(6);
-		p.set_value(6);
-		ramdon = 6;
-		std::cout << name_ << ":RunSingalingConnect Thread End" << std::endl;
 
-	}
-
-	void StartTaskCanTerminate(SATRT_COMPLETE_FUNC funt_ptr, int timeout) {
+	void StartTask(SATRT_COMPLETE_FUNC funt_ptr, int timeout) {
 		common rc = common::kAudienceOk;
-		std::chrono::system_clock::time_point time_out_seconds
+		state_ = kStarting;
+		std::chrono::system_clock::time_point timeout_time
 			= std::chrono::system_clock::now() + std::chrono::seconds(timeout);
 
 		auto start = std::chrono::system_clock::now();
 		std::time_t start_time = std::chrono::system_clock::to_time_t(start);
 		std::cout << name_ << ":time now: " << std::ctime(&start_time) << std::endl;
 
-// 		rc = CreatStreamChannelTask(time_out_seconds, funt_ptr);
-		rc = WailUntil(&BaseStreamSession::RunCreateChannelCanTerminate, this, name_, time_out_seconds);
-		if (rc != kAudienceOk) return;
-
-		rc = WailUntil(&BaseStreamSession::RunSingalingConnectCanTerminate, this, name_, time_out_seconds);
-// 		rc = ConnectAndUpdateToSignalingServerTask(time_out_seconds, funt_ptr);
-		if (rc != kAudienceOk) { 
-			std::cout << name_ << ":rc: " << rc << std::endl;
-			return; }
-	}
-
-
-	common CreatStreamChannelTask(
-		std::chrono::system_clock::time_point &time_out_seconds, SATRT_COMPLETE_FUNC funt_ptr) {
-		auto rc = common::kAudienceOk;
-		ExitAndExecuteSignals create_channel_signals;
-		std::unique_ptr<std::thread>th1_ = std::make_unique<std::thread>(&BaseStreamSession::RunCreateChannelCanTerminate, this, std::move(create_channel_signals.exit_future), std::move(create_channel_signals.execute_signal));
-
-		if (std::future_status::ready == create_channel_signals.execute_future.wait_until(time_out_seconds))
-		{
-			std::cout << name_ << ":RunCreateChannelCanTerminate Finished: \n";
-		}
-		else
-		{
-			std::cout << name_ << ":RunCreateChannelCanTerminate did not complete!\n";
-			rc = common::kTimeout;
-			create_channel_signals.exit_signal.set_value();
-			if (th1_->joinable()) {
-				th1_->join();
-			}
-			funt_ptr(name_, rc, state_);
-			return rc;
-		}
-		if (th1_->joinable()) {
-			th1_->join();
-		}
-
-		rc = create_channel_signals.execute_future.get();
-		if (rc != common::kAudienceOk) {
-			std::cout << name_ << ":RunCreateChannel Fail \n";
-		}
-		return rc;
-	}
-
-	common ConnectAndUpdateToSignalingServerTask(
-		std::chrono::system_clock::time_point time_out_seconds, SATRT_COMPLETE_FUNC funt_ptr) {
-		auto rc = common::kAudienceOk;
-		ExitAndExecuteSignals connect_signaling_signals;
-
-		std::unique_ptr<std::thread> th2_ = std::make_unique<std::thread>(&BaseStreamSession::RunSingalingConnectCanTerminate, this, std::move(connect_signaling_signals.exit_future), std::move(connect_signaling_signals.execute_signal));
-// 		if (th2_->joinable()) {
-// 			th2_->join();
-// 		}
-
-		if (std::future_status::ready == connect_signaling_signals.execute_future.wait_until(time_out_seconds))
-		{
-			std::cout << name_ << ":RunSingalingConnect: Finished: " << "\n";
-		}
-		else
-		{
-			std::cout << name_ << ":RunSingalingConnect did not complete!\n";
-			rc = common::kTimeout;
-			connect_signaling_signals.exit_signal.set_value();
-
-			if (th2_->joinable()) {
-				th2_->join();
-				}
-			funt_ptr(name_, rc, state_);
-			return rc;
-		}
-		if (th2_->joinable()) {
-			th2_->join();
-		}
-
-		rc = connect_signaling_signals.execute_future.get();
-		if (rc != common::kAudienceOk) {
-			std::cout << name_ << ":RunSingalingConnect Failed \n";
-		}
+		rc = WailUntil(&BaseStreamSession::RunStart, this, name_, timeout_time);
 		funt_ptr(name_, rc, state_);
-		return rc;
+		// run rollback here;
+// 		rc = CreatStreamChannelTask(timeout_time, funt_ptr);
+		
+// 		rc = WailUntil(&BaseStreamSession::RunCreateChannelCanTerminate, this, name_, timeout_time);
+// 		if (rc != kAudienceOk) return;
+// 
+// 		rc = WailUntil(&BaseStreamSession::RunSingalingConnectCanTerminate, this, name_, timeout_time);
+// 		rc = ConnectAndUpdateToSignalingServerTask(timeout_time, funt_ptr);
+// 		if (rc != kAudienceOk) { 
+// 			std::cout << name_ << ":rc: " << rc << std::endl;
+// 			return; }
 	}
 
 	bool inited_{ false };
@@ -258,6 +282,13 @@ private:
 	State state_{ State::kInactive };
 	std::string name_{};
 	int ramdon{ 0 };
+	StartState start_state_{ StartState::kDefault };
+	std::condition_variable signaling_cv;
+	std::condition_variable update_id_cv;
+	bool update_id = { false };
+	mutable std::mutex signaling_mutex_ = {};
+	mutable std::mutex update_id_mutex_ = {};
+	std::atomic<SIGNALING_CONNECTION_STATE> signaling_state_{ SIGNALING_CONNECTION_STATE::kClosed };
 };
 
 int main()
@@ -265,7 +296,7 @@ int main()
 	// stream session version
 	auto start = std::chrono::system_clock::now();
 	std::time_t start_time = std::chrono::system_clock::to_time_t(start);
-	int wait_seconds = 5;
+	int wait_seconds = 1;
 	std::chrono::system_clock::time_point time_out_seconds
 		= start + std::chrono::seconds(wait_seconds);
 
@@ -281,13 +312,11 @@ int main()
 	common rc;
 	State state;
 
-	s1.StartCanTerminate(&s1, wait_seconds, &OnStartComplete);
+	s1.Start(&s1, wait_seconds, &OnStartComplete);
 	auto lambda = [&s1, &wait_seconds](BaseStreamSession s1, int wait_seconds) {
-		s1.StartCanTerminate(&s1, wait_seconds, &OnStartComplete);
+		s1.Start(&s1, wait_seconds, &OnStartComplete);
 	};
 
-	// 		s1.Start(&s1, wait_seconds, &OnStartComplete);
-			//Wait for 4 sec
 	std::unique_lock<std::mutex> lk(m);
 	if (cv.wait_until(lk, time_out_seconds, []() {return finished == true; })) {
 		std::cout << "s1 Finished\n";
@@ -304,7 +333,7 @@ int main()
 	start = std::chrono::system_clock::now();
 	time_out_seconds
 		= start + std::chrono::seconds(wait_seconds);
-	s2.StartCanTerminate(&s2, 1, &OnStartComplete);
+	s2.Start(&s2, 1, &OnStartComplete);
 	// 		s2.Start(&s2, 2, &OnStartComplete);
 
 	if (cv.wait_until(lk, time_out_seconds, []() {return finished == true; })) {
