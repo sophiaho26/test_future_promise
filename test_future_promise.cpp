@@ -89,6 +89,47 @@ common WailUntil(Func func, Obj obj,std::string name,
 	return rc;
 }
 
+template <typename Func, typename Obj>
+common RunUntil(Func func, Obj obj, std::string name,
+	std::chrono::system_clock::time_point& timeout_time) {
+	auto rc = common::kAudienceOk;
+
+	ExitAndExecuteSignals signals;
+	std::promise<common> promise;
+	std::future<common> future = promise.get_future();
+	std::atomic<bool> timeout = false;
+	std::mutex cv_m;
+	std::condition_variable cv;
+
+	std::unique_ptr<std::thread>th = std::make_unique<std::thread>(func, obj, cv_m, cv, std::move(promise), timeout_time);
+
+	if (std::future_status::ready == future.wait_until(timeout_time))
+	{
+		std::cout << name << ":Run Func Finished. \n";
+	}
+	else
+	{
+		std::cout << name << ":Run Func did not complete!\n";
+		rc = common::kTimeout;
+		std::unique_lock<std::mutex> lk(cv_m);
+		timeout = true;
+		lk.unlock();
+		cv.notify_all();
+		if (th->joinable()) {
+			th->join();
+		}
+		return rc;
+	}
+	if (th->joinable()) {
+		th->join();
+	}
+
+	rc = future.get();
+	if (rc != common::kAudienceOk) {
+		std::cout << name << ":Func return rc: " << rc << " \n";
+	}
+	return rc;
+}
 
 class BaseStreamSession {
 public:
@@ -215,6 +256,44 @@ private:
 		p.set_value(rc);
 	}
 
+	common RunStartNew(std::chrono::system_clock::time_point timeout_time) {
+		auto rc = common::kTimeout;
+		std::chrono::system_clock::time_point start_time
+			= std::chrono::system_clock::now();
+
+		while (start_time < timeout_time) {
+			if (start_state_ == StartState::kDefault) {
+				rc = CreateChannel();
+				if (rc != common::kAudienceOk)
+				{
+					std::cout << "CreateChannelID rc ({})" << rc;
+					break;
+				}
+				start_state_ = StartState::kChannelCreated;
+				continue;
+			}
+			else if (start_state_ == StartState::kChannelCreated) {
+				rc = ConnectSignalingServer(timeout_time);
+				if (rc != common::kAudienceOk) {
+					std::cout << "ConnectSignalingServer rc ({})" << rc;
+					break;
+				}
+				start_state_ = StartState::kSignalingConnected;
+				continue;
+			}
+			else if (start_state_ == StartState::kSignalingConnected) {
+				rc = UpdateChannelID(timeout_time);
+				if (rc != common::kAudienceOk) {
+					std::cout << "UpdateChannelID rc ({})" << rc;
+					break;
+				}
+				start_state_ = StartState::kTrackUpdated;
+				state_ = KReady;
+				break;
+			}
+		}
+		return rc;
+	}
 
 	void RunCreateChannelCanTerminate(std::future<void> future_obj, std::promise<common> p) {
 		std::cout << name_ << ":RunCreateChannelCanTerminate Thread Start" << std::endl;
@@ -262,7 +341,8 @@ private:
 		std::time_t start_time = std::chrono::system_clock::to_time_t(start);
 		std::cout << name_ << ":time now: " << std::ctime(&start_time) << std::endl;
 
-		rc = WailUntil(&BaseStreamSession::RunStart, this, name_, timeout_time);
+// 		rc = WailUntil(&BaseStreamSession::RunStart, this, name_, timeout_time);
+		rc = RunStartNew(timeout_time);
 		funt_ptr(name_, rc, state_);
 		// run rollback here;
 // 		rc = CreatStreamChannelTask(timeout_time, funt_ptr);
@@ -296,7 +376,7 @@ int main()
 	// stream session version
 	auto start = std::chrono::system_clock::now();
 	std::time_t start_time = std::chrono::system_clock::to_time_t(start);
-	int wait_seconds = 1;
+	int wait_seconds = 3;
 	std::chrono::system_clock::time_point time_out_seconds
 		= start + std::chrono::seconds(wait_seconds);
 
