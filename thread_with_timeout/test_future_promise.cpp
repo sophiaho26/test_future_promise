@@ -153,7 +153,7 @@ public:
 	void Start(BaseStreamSession* session, int timeout, SATRT_COMPLETE_FUNC funt_ptr) {
 		if (state_ != kInited) return;
 		state_ = kStarting;
-		std::thread t = std::thread(&BaseStreamSession::StartTask, this, funt_ptr, timeout);
+		std::thread t = std::thread(&BaseStreamSession::RunStartNew, this, funt_ptr, timeout);
 		t.join();
 		return;
 	}
@@ -256,8 +256,12 @@ private:
 		p.set_value(rc);
 	}
 
-	common RunStartNew(std::chrono::system_clock::time_point timeout_time) {
+	common RunStartNew(SATRT_COMPLETE_FUNC funt_ptr, int timeout) {
 		auto rc = common::kTimeout;
+		state_ = kStarting;
+		std::chrono::system_clock::time_point timeout_time
+			= std::chrono::system_clock::now() + std::chrono::seconds(timeout);
+
 		std::chrono::system_clock::time_point start_time
 			= std::chrono::system_clock::now();
 
@@ -292,6 +296,7 @@ private:
 				break;
 			}
 		}
+		funt_ptr(name_, rc, state_);
 		return rc;
 	}
 
@@ -341,8 +346,7 @@ private:
 		std::time_t start_time = std::chrono::system_clock::to_time_t(start);
 		std::cout << name_ << ":time now: " << std::ctime(&start_time) << std::endl;
 
-// 		rc = WailUntil(&BaseStreamSession::RunStart, this, name_, timeout_time);
-		rc = RunStartNew(timeout_time);
+		rc = WailUntil(&BaseStreamSession::RunStart, this, name_, timeout_time);
 		funt_ptr(name_, rc, state_);
 		// run rollback here;
 // 		rc = CreatStreamChannelTask(timeout_time, funt_ptr);
