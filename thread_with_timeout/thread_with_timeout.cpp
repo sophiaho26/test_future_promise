@@ -26,7 +26,6 @@ enum common { kAudienceOk = 0, kTimeout, kFail };
 
 std::mutex m;
 std::condition_variable cv;
-bool finished = false;
 using SATRT_COMPLETE_FUNC =
     std::function<void(const std::string&, const common&, const State&)>;
 
@@ -37,7 +36,6 @@ void OnStartComplete(const std::string& name, const common& rc,
   std::cout << name << ": time now: " << std::ctime(&start_time) << std::endl;
   std::cout << name << ":rc = " << rc << std::endl;
   std::cout << name << ":state = " << state << std::endl;
-  finished = true;
 }
 
 struct ExitAndExecuteSignals {
@@ -132,7 +130,11 @@ common RunUntil(Func func, Obj obj, std::string name,
 class BaseStreamSession {
  public:
   BaseStreamSession(std::string name) { name_ = name; }
-  ~BaseStreamSession() {}
+  ~BaseStreamSession() { 
+    if (api_thread_.joinable()) {
+      api_thread_.join();
+    }
+  }
 
   void Init() {
     if (state_ != kInactive) return;
@@ -149,28 +151,41 @@ class BaseStreamSession {
   }
   void Start(BaseStreamSession* session, int timeout,
              SATRT_COMPLETE_FUNC funt_ptr) {
-    if (state_ != kInited) return;
-    state_ = kStarting;
-    std::thread t =
-        std::thread(&BaseStreamSession::RunStartNew, this, funt_ptr, timeout);
-    if (t.joinable())
-    {
-      t.join();
+    if (state_ != kInited) {
+      if (state_ == kStarting) {
+        std::cout << "already starting...\n";
+      }
+      return;
     }
+    state_ = kStarting;
+    api_thread_ = std::thread(&BaseStreamSession::RunStartNew, this, funt_ptr, timeout);
     return;
   }
+  void Stop(BaseStreamSession* session, int timeout,
+      SATRT_COMPLETE_FUNC funt_ptr) {
+    if (state_ != KReady) return;
+    state_ = kStopping;
+    std::thread t = std::move(api_thread_);
+    if (t.joinable()) {
+      t.join();
+    }
 
+    api_thread_ = std::thread(&BaseStreamSession::RunStartNew, this, funt_ptr,
+                            timeout);
+    return;
+
+  }
  private:
   common CreateChannel(std::chrono::system_clock::time_point& timeout_time) {
-    std::cout << "CreateChannelID entered" << std::endl;
+    std::cout << name_ << ":CreateChannelID entered" << std::endl;
     std::this_thread::sleep_for(std::chrono::milliseconds(600));
-    std::cout << "CreateChannelID left" << std::endl;
+    std::cout << name_ << ":CreateChannelID left" << std::endl;
     return common::kAudienceOk;
   }
 
   common ConnectSignalingServer(
       std::chrono::system_clock::time_point& timeout_time) {
-    std::cout << "ConnectSignalingServer entered" << std::endl;
+    std::cout << name_ << ":ConnectSignalingServer entered" << std::endl;
     std::thread([&]() {
       std::this_thread::sleep_for(std::chrono::milliseconds(600));
       std::lock_guard<std::mutex> lk(signaling_mutex_);
@@ -184,17 +199,17 @@ class BaseStreamSession {
     });
     lk.unlock();
     if (signaling_state_ != SIGNALING_CONNECTION_STATE::kOpened) {
-      std::cout << "ConnectSignalingServer timeout" << std::endl;
+      std::cout << name_ << ":ConnectSignalingServer timeout" << std::endl;
       std::cout.flush();
       return common::kTimeout;
     }
 
-    std::cout << "ConnectSignalingServer left" << std::endl;
+    std::cout << name_ << ":ConnectSignalingServer left" << std::endl;
     return common::kAudienceOk;
   }
 
   common UpdateChannelID(std::chrono::system_clock::time_point& timeout_time) {
-    std::cout << "UpdateChannelID entered" << std::endl;
+    std::cout << name_ << ":UpdateChannelID entered" << std::endl;
     std::thread([&]() {
       std::this_thread::sleep_for(std::chrono::milliseconds(1000));
       std::lock_guard<std::mutex> lk(update_id_mutex_);
@@ -206,12 +221,14 @@ class BaseStreamSession {
     update_id_cv.wait_until(lk, timeout_time, [this] { return update_id; });
     lk.unlock();
     if (!update_id) {
-      std::cout << "UpdateChannelID timeout" << std::endl;
+      std::cout << name_ << ":UpdateChannelID timeout" << std::endl;
       return common::kTimeout;
     }
 
-    std::cout << "UpdateChannelID left" << std::endl;
+    std::cout << name_ << ":UpdateChannelID left" << std::endl;
     return common::kAudienceOk;
+  }
+  void RunRollBack() {
   }
 
   common RunStartNew(SATRT_COMPLETE_FUNC funt_ptr, int timeout) {
@@ -314,13 +331,9 @@ int main() {
   auto start = std::chrono::system_clock::now();
   std::time_t start_time = std::chrono::system_clock::to_time_t(start);
   int wait_seconds = 3;
-  std::chrono::system_clock::time_point time_out_seconds =
-      start + std::chrono::seconds(wait_seconds);
+  int time_out_seconds = 1;
 
   std::cout << "time now: " << std::ctime(&start_time) << std::endl;
-  std::cout << "end time: "
-            << std::chrono::system_clock::to_time_t(time_out_seconds)
-            << std::endl;
 
   BaseStreamSession s1("s1");
   s1.Init();
@@ -331,36 +344,15 @@ int main() {
   State state;
 
   s1.Start(&s1, wait_seconds, &OnStartComplete);
-  auto lambda = [&s1, &wait_seconds](BaseStreamSession s1, int wait_seconds) {
-    s1.Start(&s1, wait_seconds, &OnStartComplete);
-  };
+  s1.Start(&s1, wait_seconds, &OnStartComplete);
 
-  std::unique_lock<std::mutex> lk(m);
-  if (cv.wait_until(lk, time_out_seconds, []() { return finished == true; })) {
-    std::cout << "s1 Finished\n";
-  } else {
-    std::cout << "s1 No Reply and time out\n";
-  }
+  //   auto lambda = [&s1, wait_seconds](BaseStreamSession &s1, int wait_seconds) {
+//     s1.Start(&s1, wait_seconds, &OnStartComplete);
+//   };
 
-  start_time =
-      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-  std::cout << "time now: " << std::ctime(&start_time) << std::endl;
-
-  finished = false;
-  wait_seconds = 3;
-  start = std::chrono::system_clock::now();
-  time_out_seconds = start + std::chrono::seconds(wait_seconds);
-  s2.Start(&s2, 1, &OnStartComplete);
-
-  if (cv.wait_until(lk, time_out_seconds, []() { return finished == true; })) {
-    std::cout << "s2 Finished\n";
-  } else {
-    std::cout << "s2 No Reply and time out\n";
-  }
-  start_time =
-      std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-  std::cout << "time now: " << std::ctime(&start_time) << std::endl;
-
+  s2.Start(&s2, time_out_seconds, &OnStartComplete);
+  s1.Stop(&s1, 1, &OnStartComplete);
+  s2.Stop(&s2, 1, &OnStartComplete);
   s1.Reset();
   s2.Reset();
   std::cout << "Test Finished..\n";
