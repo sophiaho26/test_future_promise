@@ -153,15 +153,10 @@ class BaseStreamSession {
     state_ = kStarting;
     std::thread t =
         std::thread(&BaseStreamSession::RunStartNew, this, funt_ptr, timeout);
-    t.join();
-    return;
-  }
-
-  void UpdateTrackInfo(BaseStreamSession* session, int timeout,
-                       SATRT_COMPLETE_FUNC funt_ptr) {
-    if (state_ != kUpdateNeeded && state_ != kUnstable) return;
-    api_thread_ =
-        std::thread(&BaseStreamSession::StartTask, this, funt_ptr, timeout);
+    if (t.joinable())
+    {
+      t.join();
+    }
     return;
   }
 
@@ -217,41 +212,6 @@ class BaseStreamSession {
 
     std::cout << "UpdateChannelID left" << std::endl;
     return common::kAudienceOk;
-  }
-
-  void RunStart(std::future<void> future_obj, std::promise<common> p,
-                std::chrono::system_clock::time_point timeout_time) {
-    auto rc = common::kTimeout;
-    while (future_obj.wait_for(std::chrono::milliseconds(1)) ==
-           std::future_status::timeout) {
-      if (start_state_ == StartState::kDefault) {
-        rc = CreateChannel(timeout_time);
-        if (rc != common::kAudienceOk) {
-          std::cout << "CreateChannelID rc ({})" << rc;
-          break;
-        }
-        start_state_ = StartState::kChannelCreated;
-        continue;
-      } else if (start_state_ == StartState::kChannelCreated) {
-        rc = ConnectSignalingServer(timeout_time);
-        if (rc != common::kAudienceOk) {
-          std::cout << "ConnectSignalingServer rc ({})" << rc;
-          break;
-        }
-        start_state_ = StartState::kSignalingConnected;
-        continue;
-      } else if (start_state_ == StartState::kSignalingConnected) {
-        rc = UpdateChannelID(timeout_time);
-        if (rc != common::kAudienceOk) {
-          std::cout << "UpdateChannelID rc ({})" << rc;
-          break;
-        }
-        start_state_ = StartState::kTrackUpdated;
-        state_ = KReady;
-        break;
-      }
-    }
-    p.set_value(rc);
   }
 
   common RunStartNew(SATRT_COMPLETE_FUNC funt_ptr, int timeout) {
@@ -334,34 +294,6 @@ class BaseStreamSession {
       p.set_value(common::kTimeout);
   }
 
-  void StartTask(SATRT_COMPLETE_FUNC funt_ptr, int timeout) {
-    common rc = common::kAudienceOk;
-    state_ = kStarting;
-    std::chrono::system_clock::time_point timeout_time =
-        std::chrono::system_clock::now() + std::chrono::seconds(timeout);
-
-    auto start = std::chrono::system_clock::now();
-    std::time_t start_time = std::chrono::system_clock::to_time_t(start);
-    std::cout << name_ << ":time now: " << std::ctime(&start_time) << std::endl;
-
-    rc = WailUntil(&BaseStreamSession::RunStart, this, name_, timeout_time);
-    funt_ptr(name_, rc, state_);
-    // run rollback here;
-    // 		rc = CreatStreamChannelTask(timeout_time, funt_ptr);
-
-    // 		rc = WailUntil(&BaseStreamSession::RunCreateChannelCanTerminate,
-    // this, name_, timeout_time); 		if (rc != kAudienceOk) return;
-    //
-    // 		rc =
-    // WailUntil(&BaseStreamSession::RunSingalingConnectCanTerminate, this,
-    // name_, timeout_time); 		rc =
-    // ConnectAndUpdateToSignalingServerTask(timeout_time, funt_ptr); 		if (rc
-    // !=
-    // kAudienceOk) { 			std::cout << name_ << ":rc: " << rc << std::endl;
-    // return;
-    // }
-  }
-
   bool inited_{false};
   std::thread api_thread_;
   State state_{State::kInactive};
@@ -419,7 +351,6 @@ int main() {
   start = std::chrono::system_clock::now();
   time_out_seconds = start + std::chrono::seconds(wait_seconds);
   s2.Start(&s2, 1, &OnStartComplete);
-  // 		s2.Start(&s2, 2, &OnStartComplete);
 
   if (cv.wait_until(lk, time_out_seconds, []() { return finished == true; })) {
     std::cout << "s2 Finished\n";
